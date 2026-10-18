@@ -48,31 +48,51 @@ upsert_route "profiles-route" "users-api"   "/api/profiles"
 upsert_route "catalog-route"  "catalog-api" "/api/catalog"
 upsert_route "games-route"    "catalog-api" "/api/games"
 
+# GET /api/users/{id}/library vive no catalog-api (biblioteca de jogos), mas o
+# prefixo /api/users acima aponta para o users-api. Uma rota regex mais
+# especifica (regex_priority maior) manda so esse caminho para o catalog-api.
+curl -sf -X PUT "$KONG_ADMIN/routes/library-route" \
+  --data-urlencode "service.name=catalog-api" \
+  --data-urlencode "strip_path=false" \
+  --data-urlencode "regex_priority=10" \
+  --data-urlencode 'paths[]=~/api/users/[^/]*/library$' > /dev/null \
+  && ok "rota /api/users/{id}/library -> catalog-api" || err "falha na rota library-route"
+
 echo ""
 echo "=========== PLUGINS ==========="
 
-curl -sf -X POST "$KONG_ADMIN/services/users-api/plugins" \
-  -d "name=rate-limiting" \
-  -d "config.minute=100" \
-  -d "config.policy=local" > /dev/null 2>&1 \
-  && ok "rate-limiting: 100 req/min em users-api" \
-  || info "rate-limiting ja configurado"
+# Cria um plugin e diferencia os desfechos: 201 = criado, 409 = ja existia
+# (idempotencia), qualquer outro status = ERRO real (nao esconder falhas).
+# Uso: post_plugin <descricao> <url-do-escopo> <args-curl...>
+post_plugin() {
+  local desc="$1" url="$2"; shift 2
+  local out code
+  out=$(curl -s -o /tmp/kong-plugin.out -w "%{http_code}" -X POST "$url" "$@")
+  code="$out"
+  case "$code" in
+    201) ok "$desc" ;;
+    409) info "$desc (ja configurado)" ;;
+    *)   err "$desc - HTTP $code: $(head -c 300 /tmp/kong-plugin.out)" ;;
+  esac
+}
 
-curl -sf -X POST "$KONG_ADMIN/plugins" \
+post_plugin "rate-limiting: 100 req/min em users-api" "$KONG_ADMIN/services/users-api/plugins" \
+  -d "name=rate-limiting" -d "config.minute=100" -d "config.policy=local"
+
+# Campos de lista do Kong (methods/headers/origins) exigem um parametro por item
+# (campo[]=valor) - passar "GET,POST,..." num valor so e rejeitado com HTTP 400.
+post_plugin "CORS global" "$KONG_ADMIN/plugins" \
   -d "name=cors" \
-  -d "config.origins=*" \
-  -d "config.methods=GET,POST,PUT,DELETE,OPTIONS,PATCH" \
-  -d "config.headers=Content-Type,Authorization" > /dev/null 2>&1 \
-  && ok "CORS global habilitado" \
-  || info "CORS ja configurado"
+  -d "config.origins[]=*" \
+  -d "config.methods[]=GET"  -d "config.methods[]=POST"    -d "config.methods[]=PUT" \
+  -d "config.methods[]=DELETE" -d "config.methods[]=OPTIONS" -d "config.methods[]=PATCH" \
+  -d "config.headers[]=Content-Type" -d "config.headers[]=Authorization"
 
 # JWT apenas na rota protegida, NAO no servico inteiro: aplicar no servico
-# bloquearia /api/auth (login) e criaria um impasse — sem login nao ha
+# bloquearia /api/auth (login) e criaria um impasse - sem login nao ha
 # token, e sem token nao se faz login.
-curl -sf -X POST "$KONG_ADMIN/routes/users-route/plugins" \
-  -d "name=jwt" > /dev/null 2>&1 \
-  && ok "JWT exigido em /api/users (login em /api/auth segue aberto)" \
-  || info "JWT ja configurado em /api/users"
+post_plugin "JWT exigido em /api/users (login em /api/auth segue aberto)" "$KONG_ADMIN/routes/users-route/plugins" \
+  -d "name=jwt"
 
 echo ""
 echo "=========== CONSUMER ==========="

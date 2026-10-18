@@ -96,6 +96,26 @@ kubectl port-forward -n fcg-fase3 svc/kong 8000:8000 8001:8001
 KONG_ADMIN="http://localhost:8001" bash fcg-api-gateway/setup-routes.sh
 ```
 
+### Stack de observabilidade escolhida: Opção A (Prometheus + Grafana)
+
+Optamos pela stack de código aberto, implantada **via manifestos Kubernetes** (`k8s/fase3-observability/`): o Prometheus coleta `/metrics` do UsersAPI e do CatalogAPI (instrumentados com `prometheus-net`, `UseHttpMetrics()`) e do Kong; o Grafana carrega, por provisionamento (ConfigMaps), o datasource e o dashboard **FCG - UsersAPI & CatalogAPI** com latência p95, contagem de requisições (total e por status code HTTP) e taxa de erro. Alertas em `fcg-observability/prometheus/alert-rules.yml`.
+
+### Serverless: Azure Function de notificações
+
+O `NotificationsAPI` (container sempre ligado) foi substituído por uma Azure Function acionada por mensagem do RabbitMQ — código e IaC em [fcg-notifications-serverless](https://github.com/laviniaptrabuco/fcg-notifications-serverless).
+
+O `payments-api` publica o `PaymentProcessedEvent` num *exchange* (pub/sub). O `catalog-api` tem a sua fila ligada a ele e a Function tem uma fila **própria** (`notifications-payment-processed`), também ligada ao exchange — cada um recebe uma cópia do evento, sem competir pelas mensagens. Rodando localmente contra o cluster:
+
+```bash
+kubectl port-forward -n fcg-fase3 svc/rabbitmq 5672:5672 15672:15672 &
+git clone https://github.com/laviniaptrabuco/fcg-notifications-serverless && cd fcg-notifications-serverless
+azurite --silent --location ./.azurite &            # storage emulado exigido pelo runtime
+bash infra/setup-rabbitmq.sh                        # cria a fila dedicada + binding
+func start                                          # requer Azure Functions Core Tools v4
+```
+
+Deploy no Azure: `infra/main.bicep` (Consumption Plan) — ver o README do repositório da Function.
+
 ### Fluxo de teste (Fase 3)
 
 ```bash
