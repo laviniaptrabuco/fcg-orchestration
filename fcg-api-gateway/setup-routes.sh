@@ -94,6 +94,14 @@ post_plugin "CORS global" "$KONG_ADMIN/plugins" \
 post_plugin "JWT exigido em /api/users (login em /api/auth segue aberto)" "$KONG_ADMIN/routes/users-route/plugins" \
   -d "name=jwt"
 
+# Metricas do proprio gateway (kong_http_requests_total etc.) em :8001/metrics,
+# raspadas pelo Prometheus (job "kong") e usadas no painel "Kong - Requisicoes
+# por segundo" do Grafana. Sem este plugin o painel fica sem dados.
+post_plugin "prometheus: metricas do Kong" "$KONG_ADMIN/plugins" \
+  -d "name=prometheus" -d "config.per_consumer=false" \
+  -d "config.status_code_metrics=true" -d "config.latency_metrics=true"
+# (no Kong 3.x kong_http_requests_total so existe com status_code_metrics=true)
+
 echo ""
 echo "=========== CONSUMER ==========="
 curl -sf -X PUT "$KONG_ADMIN/consumers/$CONSUMER_NAME" > /dev/null 2>&1 \
