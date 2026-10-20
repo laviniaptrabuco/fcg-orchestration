@@ -2,8 +2,20 @@
 
 Repositório de orquestração da plataforma FIAP Cloud Games. Contém a evolução em duas fases:
 
-- **Fase 2** (tag [`fase-2`](../../tags/fase-2)): microsserviços puros, comunicação via RabbitMQ/MassTransit, SQL Server.
+- **Fase 2** (tag [`fase-2`](https://github.com/laviniaptrabuco/fcg-orchestration/tree/fase-2)): microsserviços puros, comunicação via RabbitMQ/MassTransit, SQL Server.
 - **Fase 3** (branch `main`, atual): API Gateway (Kong), observabilidade (Prometheus + Grafana), persistência poliglota (SQL Server + MongoDB + Redis) e Serverless.
+
+### Repositórios do projeto
+
+Cada componente tem o seu repositório. A branch `main` é a Fase 3; a entrega da Fase 2 está preservada na tag `fase-2` de cada um.
+
+| Componente | Fase 3 (`main`) | Fase 2 (tag `fase-2`) |
+|---|---|---|
+| Orquestração (este repositório) | [fcg-orchestration](https://github.com/laviniaptrabuco/fcg-orchestration) | [fase-2](https://github.com/laviniaptrabuco/fcg-orchestration/tree/fase-2) |
+| UsersAPI | [fcg-users-api](https://github.com/laviniaptrabuco/fcg-users-api) | [fase-2](https://github.com/laviniaptrabuco/fcg-users-api/tree/fase-2) |
+| CatalogAPI | [fcg-catalog-api](https://github.com/laviniaptrabuco/fcg-catalog-api) | [fase-2](https://github.com/laviniaptrabuco/fcg-catalog-api/tree/fase-2) |
+| PaymentsAPI | [fcg-payments-api](https://github.com/laviniaptrabuco/fcg-payments-api) | [fase-2](https://github.com/laviniaptrabuco/fcg-payments-api/tree/fase-2) |
+| Notificações | [fcg-notifications-serverless](https://github.com/laviniaptrabuco/fcg-notifications-serverless) (Azure Function) | [fcg-notifications-api](https://github.com/laviniaptrabuco/fcg-notifications-api) (container, substituído na Fase 3) |
 
 > Para rodar exatamente o ambiente da Fase 2 (sem Kong/observabilidade/Mongo), faça `git checkout fase-2` neste repositório e nos repositórios de cada microsserviço (todos têm a mesma tag).
 
