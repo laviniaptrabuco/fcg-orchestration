@@ -1,0 +1,32 @@
+# Segredos: nunca versionar
+.env
+*.env
+!.env.example
+*.tfvars
+!*.tfvars.example
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl.bak
+local.settings.json
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+coverage/
+
+# Node / build / logs
+node_modules/
+dist/
+build/
+*.log
+*.tmp
+
+# Material local de entrega (nao versionado)
+*.mp4
+*.srt
+*.pdf

@@ -1,255 +1,194 @@
-# FCG Orchestration
+# FCG Fase 4 — Cloud-Native: Kubernetes gerenciado, CI/CD, NoSQL, Cache e Busca
 
-Repositório de orquestração da plataforma FIAP Cloud Games. Contém a evolução em duas fases:
+Evolução da plataforma **FIAP Cloud Games**: cluster **AKS** na Azure com registry privado **ACR**, pipeline
+**GitHub Actions** (build → testes → imagem versionada → scan → push → deploy com Rolling Update),
+persistência poliglota (**SQL Server + MongoDB**), cache **Redis**, busca avançada com **Elasticsearch** e
+gestão de segredos com **Azure Key Vault** (zero credenciais no código).
 
-- **Fase 2** (tag [`fase-2`](https://github.com/laviniaptrabuco/fcg-orchestration/tree/fase-2)): microsserviços puros, comunicação via RabbitMQ/MassTransit, SQL Server.
-- **Fase 3** (branch `main`, atual): API Gateway (Kong), observabilidade (Prometheus + Grafana), persistência poliglota (SQL Server + MongoDB + Redis) e Serverless.
+> Guia central da entrega. Repositórios (um por componente):
+> `fcg-orchestration` (este) · `fcg-users-api` · `fcg-catalog-api` · `fcg-payments-api`
 
-### Repositórios do projeto
-
-Cada componente tem o seu repositório. A branch `main` é a Fase 3; a entrega da Fase 2 está preservada na tag `fase-2` de cada um.
-
-| Componente | Fase 3 (`main`) | Fase 2 (tag `fase-2`) |
-|---|---|---|
-| Orquestração (este repositório) | [fcg-orchestration](https://github.com/laviniaptrabuco/fcg-orchestration) | [fase-2](https://github.com/laviniaptrabuco/fcg-orchestration/tree/fase-2) |
-| UsersAPI | [fcg-users-api](https://github.com/laviniaptrabuco/fcg-users-api) | [fase-2](https://github.com/laviniaptrabuco/fcg-users-api/tree/fase-2) |
-| CatalogAPI | [fcg-catalog-api](https://github.com/laviniaptrabuco/fcg-catalog-api) | [fase-2](https://github.com/laviniaptrabuco/fcg-catalog-api/tree/fase-2) |
-| PaymentsAPI | [fcg-payments-api](https://github.com/laviniaptrabuco/fcg-payments-api) | [fase-2](https://github.com/laviniaptrabuco/fcg-payments-api/tree/fase-2) |
-| Notificações | [fcg-notifications-serverless](https://github.com/laviniaptrabuco/fcg-notifications-serverless) (Azure Function) | [fcg-notifications-api](https://github.com/laviniaptrabuco/fcg-notifications-api) (container, substituído na Fase 3) |
-
-> Para rodar exatamente o ambiente da Fase 2 (sem Kong/observabilidade/Mongo), faça `git checkout fase-2` neste repositório e nos repositórios de cada microsserviço (todos têm a mesma tag).
-
----
-
-## Fase 3 (atual)
-
-### Arquitetura
+## Arquitetura
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                         Cliente                                   │
-└───────────────────────────────┬───────────────────────────────────┘
-                                 │ HTTP
-                                 ▼
-                   ┌─────────────────────────┐
-                   │   Kong API Gateway       │
-                   │  proxy :8000 / admin :8001│
-                   │  JWT · Rate Limit · CORS │
-                   └────────┬──────┬──────────┘
-                            │      │
-              /api/users    │      │  /api/catalog
-              /api/auth     │      │  /api/games
-              /api/profiles │      │
-                            ▼      ▼
-                  ┌────────────┐ ┌────────────┐
-                  │ UsersAPI   │ │ CatalogAPI │
-                  └─┬───┬───┬──┘ └─┬───┬───┬──┘
-                    │   │   │      │   │   │
-        ┌───────────┘   │   └──────┘   │   └───────────┐
-        ▼               ▼              ▼               ▼
-  ┌──────────┐    ┌──────────┐   ┌──────────┐   ┌──────────┐
-  │SQL Server│    │ MongoDB  │   │  Redis   │   │ RabbitMQ │
-  │(relacional│   │(perfis,  │   │ (cache-  │   │ (eventos │
-  │ core)    │    │ reviews) │   │  aside)  │   │ de compra)│
-  └──────────┘    └──────────┘   └──────────┘   └────┬─────┘
-                                                       │
-                                        ┌──────────────┼───────────────┐
-                                        ▼                              ▼
-                                ┌─────────────┐              ┌──────────────────┐
-                                │PaymentsAPI  │              │ Azure Function    │
-                                │(worker)     │              │ (notifications -  │
-                                └─────────────┘              │  repo próprio)    │
-                                                              └──────────────────┘
+                    Internet
+                       │
+            ┌──────────▼───────────┐        GitHub Actions (OIDC, sem senhas)
+            │  Azure Load Balancer │        ┌────────────────────────────────────┐
+            └──────────┬───────────┘        │ push main → test → docker build    │
+                       │                    │ → Trivy → push ACR → kubectl apply │
+            ┌──────────▼───────────┐        └───────────────┬────────────────────┘
+            │  Ingress NGINX (AKS) │                        │
+            └───┬──────────────┬───┘            ┌───────────▼───────────┐
+   /api/auth    │              │ /api/games     │  ACR (registry priv.) │
+   /api/users   │              │ (+ /search)    └───────────────────────┘
+   /api/profiles│              │
+         ┌──────▼─────┐   ┌────▼───────┐   RabbitMQ   ┌──────────────┐
+         │ users-api  │   │ catalog-api├─────────────►│ payments-api │
+         │ (2 pods)   │   │ (2 pods)   │◄─────────────┤  (worker)    │
+         └─┬────┬───┬─┘   └─┬───┬───┬──┴┐             └──────┬───────┘
+           │    │   │       │   │   │   │                    │
+   SQL Server  MongoDB  Redis  │  Elasticsearch              MongoDB
+   (usuários) (perfis)  (cache)│  (busca fuzzy)             (pagamentos)
+                               └─ SQL Server (catálogo = fonte da verdade)
 
-Observabilidade: UsersAPI/CatalogAPI --/metrics--> Prometheus --> Grafana
+   Key Vault ──(pipeline infra)──► Secret "fcg-secrets" ──► env vars dos pods
+   Prometheus + Grafana (port-forward) ◄── /metrics dos serviços
 ```
 
-**Persistência poliglota:** SQL Server guarda os dados centrais (usuários, catálogo). MongoDB guarda dados expandidos (perfis, reviews). Redis faz cache-aside sobre o MongoDB. Repositório da função serverless: [fcg-notifications-serverless](https://github.com/laviniaptrabuco/fcg-notifications-serverless).
+## Atendimento ao enunciado
 
-### Executar com Docker Compose
+| Requisito (TC Fase 4) | Onde está |
+|---|---|
+| Kubernetes **gerenciado** em nuvem (AKS) | `terraform/main.tf` → `azurerm_kubernetes_cluster` |
+| Registry privado nativo (ACR) | `terraform/main.tf` → `azurerm_container_registry` (admin desabilitado; pull pela identidade do kubelet) |
+| Exposição via Ingress/LB | `k8s/ingress/ingress.yaml` + Ingress NGINX (helm, no workflow `infra`) |
+| **NoSQL obrigatório** (MongoDB + driver oficial) | Perfis (Users), avaliações (Catalog), pagamentos (Payments) — `MongoDB.Driver` |
+| **Cache obrigatório** (Redis) | Perfis, `GET /api/games` e `/search` — `IDistributedCache` / StackExchange.Redis |
+| **Elasticsearch**: índice sincronizado + `/search` fuzzy por relevância | `fcg-catalog-api` → `Search/ElasticsearchGameSearchIndex.cs`, `GamesController.Search` |
+| CI/CD GitHub Actions (≥ Users e Catalog) | `.github/workflows/ci-cd.yml` em users, catalog **e** payments |
+| Build & Test | `dotnet build` + `dotnet test` (24 testes Users, 34 Catalog) |
+| Containerização com **tags versionadas** | `1.0.<run_number>`, `sha-<commit>`, `latest` |
+| Security scan (desejável) | Trivy (`TRIVY_BLOCK=true` torna bloqueante) |
+| Push no registry da cloud | `az acr login` + `docker push` (login OIDC) |
+| Deploy **Rolling Update** sem downtime | `strategy.rollingUpdate: maxUnavailable 0, maxSurge 1`, 2 réplicas, readinessProbe, PDB, rollback automático |
+| **Zero hardcoded credentials** | sem senha em código/YAML/compose; ver "Segredos" abaixo; job `validate` bloqueia regressões |
+| Injeção de secrets | Secret `fcg-secrets` ← Azure Key Vault; pods usam `secretKeyRef` |
 
-```bash
-docker-compose -f docker-compose.fase3.yml up -d --build
-
-# Acessos:
-# Kong Proxy:  http://localhost:8000    Kong Admin: http://localhost:8001
-# Grafana:     http://localhost:3000 (admin/admin)
-# Prometheus:  http://localhost:9090
-# RabbitMQ:    http://localhost:15672 (guest/guest)
-# MongoDB:     localhost:27017 (admin/admin)  Redis: localhost:6379
-# SQL Server:  localhost:1433 (SA / FCG_Dev@2024)
-
-bash fcg-api-gateway/setup-routes.sh
-```
-
-### Deploy no Kubernetes
-
-Pré-requisitos: cluster local (Docker Desktop Kubernetes, Minikube ou Kind), `kubectl` configurado, imagens buildadas localmente:
-
-```bash
-docker build -t fcg-users-api:fase3    ../fcg-users-api
-docker build -t fcg-catalog-api:fase3  ../fcg-catalog-api
-docker build -t fcg-payments-api:fase3 ../fcg-payments-api
-```
-
-> **Minikube/Kind** rodam um daemon Docker separado do host: depois do build, carregue as imagens no cluster (`minikube image load ...` ou `kind load docker-image ...`) antes de aplicar os manifestos. **Docker Desktop Kubernetes** compartilha o daemon automaticamente.
-
-```bash
-kubectl apply -f k8s/fase3-namespace.yaml
-kubectl apply -f k8s/fase3-data/
-kubectl apply -f k8s/fase3-gateway/kong-migration-job.yaml
-kubectl wait --for=condition=complete job/kong-migration -n fcg-fase3 --timeout=90s
-kubectl apply -f k8s/fase3-gateway/kong.yaml
-kubectl apply -f k8s/fase3-observability/
-kubectl apply -f k8s/fase3-services/
-
-kubectl get pods -n fcg-fase3
-kubectl port-forward -n fcg-fase3 svc/kong 8000:8000 8001:8001
-KONG_ADMIN="http://localhost:8001" bash fcg-api-gateway/setup-routes.sh
-```
-
-### Stack de observabilidade escolhida: Opção A (Prometheus + Grafana)
-
-Optamos pela stack de código aberto, implantada **via manifestos Kubernetes** (`k8s/fase3-observability/`): o Prometheus coleta `/metrics` do UsersAPI e do CatalogAPI (instrumentados com `prometheus-net`, `UseHttpMetrics()`) e do Kong; o Grafana carrega, por provisionamento (ConfigMaps), o datasource e o dashboard **FCG - UsersAPI & CatalogAPI** com latência p95, contagem de requisições (total e por status code HTTP) e taxa de erro. Alertas em `fcg-observability/prometheus/alert-rules.yml`.
-
-### Serverless: Azure Function de notificações
-
-O `NotificationsAPI` (container sempre ligado) foi substituído por uma Azure Function acionada por mensagem do RabbitMQ — código e IaC em [fcg-notifications-serverless](https://github.com/laviniaptrabuco/fcg-notifications-serverless).
-
-O `payments-api` publica o `PaymentProcessedEvent` num *exchange* (pub/sub). O `catalog-api` tem a sua fila ligada a ele e a Function tem uma fila **própria** (`notifications-payment-processed`), também ligada ao exchange — cada um recebe uma cópia do evento, sem competir pelas mensagens. Rodando localmente contra o cluster:
-
-```bash
-kubectl port-forward -n fcg-fase3 svc/rabbitmq 5672:5672 15672:15672 &
-git clone https://github.com/laviniaptrabuco/fcg-notifications-serverless && cd fcg-notifications-serverless
-azurite --silent --location ./.azurite &            # storage emulado exigido pelo runtime
-bash infra/setup-rabbitmq.sh                        # cria a fila dedicada + binding
-func start                                          # requer Azure Functions Core Tools v4
-```
-
-Deploy no Azure: `infra/main.bicep` (Consumption Plan) — ver o README do repositório da Function.
-
-### Fluxo de teste (Fase 3)
-
-```bash
-# 1. Cadastro
-curl -X POST http://localhost:8000/api/auth/register -H "Content-Type: application/json" \
-  -d '{"name":"João Gamer","email":"joao@email.com","password":"Senha@123"}'
-
-# 2. Login
-curl -X POST http://localhost:8000/api/auth/login -H "Content-Type: application/json" \
-  -d '{"email":"joao@email.com","password":"Senha@123"}'
-# -> {"token": "eyJ...", ...}
-
-# 3. JWT + RBAC: sem token = 401; com token comum em rota de Admin = 403
-curl http://localhost:8000/api/users
-curl http://localhost:8000/api/users -H "Authorization: Bearer {token}"
-
-# 4. Perfil - MongoDB + cache Redis (1ª leitura: source=mongodb, 2ª: source=redis)
-curl -X PUT http://localhost:8000/api/profiles/{userId} -H "Authorization: Bearer {token}" \
-  -H "Content-Type: application/json" -d '{"displayName":"João","favoriteGenres":["RPG"]}'
-curl http://localhost:8000/api/profiles/{userId} -H "Authorization: Bearer {token}"
-
-# 5. Observabilidade
-curl http://localhost:9090/api/v1/targets
-curl "http://localhost:9090/api/v1/query?query=http_requests_received_total"
-```
-
-Grafana (`http://localhost:3000`, admin/admin) → dashboard **FCG - UsersAPI & CatalogAPI**: requisições por segundo, por status code HTTP, latência p95 e taxa de erro em tempo real.
-
-### Estrutura
+## Estrutura deste repositório
 
 ```
 fcg-orchestration/
-├── docker-compose.yml         Fase 2
-├── docker-compose.fase3.yml   Fase 3
+├── .github/workflows/infra.yml     validate (fmt, kubeconform, anti-segredo) + provision (terraform → cluster)
+├── terraform/                      RG, ACR, AKS, Key Vault + segredos gerados (random_password)
 ├── k8s/
-│   ├── sqlserver/ rabbitmq/ users-api/ catalog-api/ payments-api/ notifications-api/   Fase 2
-│   └── fase3-namespace.yaml fase3-data/ fase3-gateway/ fase3-observability/ fase3-services/  Fase 3
-├── fcg-api-gateway/    setup-routes.sh (Kong)
-└── fcg-observability/  prometheus.yml, alert-rules.yml, datasources e dashboards do Grafana
+│   ├── 00-namespace.yaml  01-config.yaml        namespace e ConfigMap (não sensível)
+│   ├── data/                       SQL Server, MongoDB, Redis, RabbitMQ, Elasticsearch (StatefulSets + PVC)
+│   ├── observability/              Prometheus + Grafana (dashboard provisionado)
+│   └── ingress/ingress.yaml
+└── scripts/
+    ├── bootstrap-azure.sh          1x: estado do Terraform + identidade OIDC do GitHub Actions
+    ├── sync-secrets.sh             Key Vault → Secret do Kubernetes (pipeline)
+    ├── local-secret-from-env.sh    mesmo Secret em cluster local
+    └── set-github-vars.sh          cadastra ACR/AKS como variables nos repos dos serviços
 ```
 
----
+Os manifestos de cada serviço ficam no próprio repositório (`k8s/deployment.yaml`), junto da pipeline que os aplica.
 
-## Fase 2
+## Segredos e gestão de credenciais
 
-### Arquitetura
+- **Nada sensível no Git**: `appsettings*.json`, manifestos, `docker-compose.yml` e scripts não têm senha, chave ou connection string com credencial. O `.env` local é gerado por `scripts/generate-local-env.sh` e está no `.gitignore`.
+- **Origem**: o Terraform gera as senhas (`random_password`) e grava no **Azure Key Vault** (RBAC). Ninguém digita nem vê esses valores.
+- **Injeção**: a pipeline `infra` lê o Key Vault (identidade OIDC com *Key Vault Secrets User*) e cria o **Secret `fcg-secrets`** no namespace `fcg`. Os pods referenciam as chaves por `secretKeyRef` e montam as connection strings com `$(VAR)` do Kubernetes, então o YAML só guarda *referências*.
+- **Falha segura**: as APIs não têm valor padrão com senha; sem `Jwt__Secret`, MongoDB, Redis ou RabbitMQ configurados, **recusam subir**.
+- **Pipeline sem senhas**: GitHub → Azure via **OIDC (federated credentials)**; não há *client secret* armazenado.
+- **Rotação**: altere o valor no Key Vault, rode `sync-secrets.sh` (ou o workflow) e `kubectl rollout restart`.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    FIAP Cloud Games                         │
-│                                                             │
-│  ┌──────────────┐    UserCreatedEvent    ┌───────────────┐  │
-│  │  UsersAPI    │ ──────────────────────▶│Notifications  │  │
-│  │  (porta 5001)│                        │     API       │  │
-│  └──────────────┘                        └───────────────┘  │
-│                                                    ▲        │
-│  ┌──────────────┐  OrderPlacedEvent  ┌──────────┐  │        │
-│  │  CatalogAPI  │ ─────────────────▶ │Payments  │  │        │
-│  │  (porta 5002)│◀──────────────────│   API    │──┘        │
-│  └──────────────┘ PaymentProcessedEv └──────────┘           │
-│                                                             │
-│  Broker: RabbitMQ (porta 5672 / management 15672)           │
-│  Banco:  SQL Server (porta 1433)                            │
-└─────────────────────────────────────────────────────────────┘
-```
+## Passo a passo — subir tudo na Azure
 
-### Executar com Docker Compose
+Pré-requisitos: assinatura Azure, `az`, `gh`, repositórios criados no GitHub.
 
 ```bash
-docker-compose up --build
+# 1) UMA vez: estado do Terraform + identidade OIDC do GitHub Actions
+az login
+GITHUB_OWNER=laviniaptrabuco bash scripts/bootstrap-azure.sh
+#    → imprime AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID (secrets)
+#      e TFSTATE_RG / TFSTATE_SA / DEPLOYER_OBJECT_ID (variables). Cadastre-os no GitHub.
 
-# UsersAPI Swagger:   http://localhost:5001/swagger
-# CatalogAPI Swagger: http://localhost:5002/swagger
-# RabbitMQ Manager:  http://localhost:15672 (guest/guest)
+# 2) Provisionar: dispare o workflow "infra" (Actions → infra → Run workflow) ou faça push na main.
+#    Cria RG + ACR + AKS + Key Vault, instala o Ingress, sincroniza o Secret e sobe os dados.
+
+# 3) Cadastrar o ACR/AKS nos repos dos serviços (valores no resumo do workflow infra)
+GITHUB_OWNER=laviniaptrabuco bash scripts/set-github-vars.sh <acr_name> <aks_name> <resource_group>
+
+# 4) Primeiro deploy: push na main de cada serviço (ou "Run workflow"). A partir daí,
+#    todo push na main = build → test → imagem → scan → push → deploy.
+
+# 5) Obter o IP público
+az aks get-credentials -g <resource_group> -n <aks_name>
+kubectl get svc ingress-nginx-controller -n ingress-nginx
 ```
 
-### Deploy no Kubernetes
+> **Custo**: 2 nós `Standard_D2s_v3` + ACR Standard + Key Vault. Destrua ao terminar: `terraform destroy`
+> (ou `az group delete -n rg-fcg-prod`).
+
+## Roteiro de teste (substitua `$IP` pelo IP do Ingress)
 
 ```bash
-docker build -t fcg-users-api:latest ../fcg-users-api
-docker build -t fcg-catalog-api:latest ../fcg-catalog-api
-docker build -t fcg-payments-api:latest ../fcg-payments-api
-docker build -t fcg-notifications-api:latest ../fcg-notifications-api
+# Cadastro e login
+curl -X POST http://$IP/api/auth/register -H "Content-Type: application/json" \
+  -d '{"name":"Joao Gamer","email":"joao@email.com","password":"Senha@123"}'
+curl -X POST http://$IP/api/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"joao@email.com","password":"Senha@123"}'
 
-kubectl apply -f k8s/sqlserver/
-kubectl apply -f k8s/rabbitmq/
-kubectl apply -f k8s/users-api/
-kubectl apply -f k8s/catalog-api/
-kubectl apply -f k8s/payments-api/
-kubectl apply -f k8s/notifications-api/
+# NoSQL + cache de perfil: 1ª leitura source=mongodb, 2ª source=redis
+curl -X PUT http://$IP/api/profiles/{userId} -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"displayName":"Joao","bio":"Gamer","favoriteGenres":["RPG"]}'
+curl http://$IP/api/profiles/{userId} -H "Authorization: Bearer $TOKEN"
 
-kubectl get pods
-kubectl get services
-kubectl port-forward svc/users-api-service 5001:80
-kubectl port-forward svc/catalog-api-service 5002:80
-```
+# Busca avançada (Elasticsearch): fuzzy tolera erro de digitação; ordenada por relevância
+curl -i "http://$IP/api/games/search?q=wiitcher"        # acha "The Witcher 3" mesmo com o typo
+curl -i "http://$IP/api/games/search?q=zeldda&genre=Aventura"
 
-### Fluxo de teste (Fase 2)
-
-**1. Cadastro de usuário (fluxo boas-vindas)**
-```
-POST http://localhost:5001/api/auth/register
-{"name": "João Gamer", "email": "joao@email.com", "password": "Senha@123"}
-```
-→ Logs do `notifications-api`: `[EMAIL SIMULADO] Boas-vindas enviado para: joao@email.com`
-
-**2. Login**
-```
-POST http://localhost:5001/api/auth/login
-{"email": "joao@email.com", "password": "Senha@123"}
+# Impacto do cache: compare X-Cache e X-Elapsed-Ms (MISS = banco/Elasticsearch, HIT = Redis)
+curl -si http://$IP/api/games | grep -iE "x-cache|x-elapsed"
+curl -si http://$IP/api/games | grep -iE "x-cache|x-elapsed"
 ```
 
-**3. Cadastrar jogo (como admin)**
-```
-POST http://localhost:5002/api/games
-Authorization: Bearer {token_admin}
-{"title": "Elden Ring", "description": "RPG de ação", "genre": "RPG", "price": 249.90}
+Criar/editar um jogo (Admin) reindexa no Elasticsearch **e** invalida o cache: a busca seguinte já reflete a mudança.
+
+## Live Deploy (demonstração do pitch)
+
+1. Altere algo visível no `fcg-catalog-api` (ex.: texto de uma mensagem ou um novo campo na resposta).
+2. `git commit` + `git push` na `main`.
+3. Em **Actions**: `Build & Test` → `Docker image, scan & push` (nova tag `1.0.N`) → `Deploy no AKS`.
+4. `kubectl get pods -n fcg -w`: pods novos sobem, só então os antigos saem (`maxUnavailable: 0`) — **sem downtime**.
+5. Reexecute o `curl` e mostre a mudança em produção. `kubectl rollout history deployment/catalog-api -n fcg` mostra a revisão.
+
+## Observabilidade
+
+```bash
+kubectl port-forward -n fcg svc/grafana 3000:3000      # usuário admin; senha no Key Vault (grafana-admin-password)
+kubectl port-forward -n fcg svc/prometheus 9090:9090
 ```
 
-**4. Comprar jogo (fluxo de compra completo)**
+Dashboard **FCG - UsersAPI & CatalogAPI**: requisições/s, por status HTTP, latência p95 e taxa de erro.
+
+## Ambiente local (Docker Compose)
+
+```bash
+bash scripts/generate-local-env.sh         # (na raiz do workspace) gera .env com senhas aleatórias
+docker compose up -d --build
+# users-api  → http://localhost:8081/swagger   catalog-api → http://localhost:8082/swagger
+# Grafana    → http://localhost:3000            Prometheus  → http://localhost:9090
 ```
-POST http://localhost:5002/api/games/{gameId}/purchase
-Authorization: Bearer {token_usuario}
-```
-→ Logs: `catalog-api: OrderPlacedEvent published` → `payments-api: PaymentProcessedEvent published: Status=Approved` → `catalog-api: Game {gameId} added to library` → `notifications-api: [EMAIL SIMULADO] Confirmação de compra enviado`
+
+## Evidências (validado localmente com Docker Compose)
+
+| Teste | Resultado |
+|---|---|
+| `dotnet test` Users / Catalog | 24 / 34 testes passando |
+| `terraform fmt` + `validate` | OK |
+| `kubeconform -strict` nos manifestos | 31 recursos válidos, 0 inválidos |
+| Login do Admin inicial (bootstrap por Secret) e criação de 3 jogos | 201 + indexação no Elasticsearch |
+| `/search?q=wiitcher` (typo) | acha *The Witcher 3* (score 2.63) |
+| `/search?q=zeldda` (typo) | acha *Zelda Breath of the Wild* |
+| `/search?q=cyber` (prefixo) | acha *Cyberpunk 2077* |
+| Busca repetida | `X-Cache: MISS` 261 ms → `HIT` 3 ms |
+| `GET /api/games` | `MISS` 10 ms → `HIT` 1,7 ms |
+| `/search` sem `q` | 400 |
+
+Não executado aqui: `terraform apply`, pipelines no GitHub e deploy no AKS (dependem da sua conta Azure/GitHub).
+
+## Decisões e limites (honestidade técnica)
+
+- **Elasticsearch no cluster** (StatefulSet com basic auth) para controlar custo na disciplina. O enunciado cita serviço
+  gerenciado (Elastic Cloud/OpenSearch): o código já suporta `Elasticsearch__ApiKey` ou usuário/senha, então migrar é
+  trocar `Elasticsearch__Uri` no `01-config.yaml` e o segredo no Key Vault — sem alterar código.
+- **Bancos em StatefulSets** (SQL Server, MongoDB, Redis, RabbitMQ) com disco gerenciado (PVC). Em produção real o ideal
+  é Azure SQL/Cosmos DB (API Mongo)/Azure Cache for Redis; mantive o mesmo modelo da Fase 3 para portabilidade.
+- **Kong (Fase 3)** foi substituído pelo **Ingress NGINX** na nuvem (roteamento por path + rate limit). O Kong pode ser
+  reimplantado atrás do Ingress se a nota da Fase 3 exigir gateway dedicado.
+- **TLS/host**: o Ingress responde por IP público em HTTP; para HTTPS adicione cert-manager + domínio.
+- A conta Azure, o `terraform apply` e o primeiro deploy dependem das credenciais do aluno e **precisam ser executados por você**
+  (o repositório entrega toda a automação, mas a execução na nuvem não foi feita neste ambiente).

@@ -1,0 +1,21 @@
+# Configuracao NAO sensivel compartilhada pelos servicos.
+# Segredos (senhas, JWT, chaves) ficam no Secret "fcg-secrets", criado em runtime
+# a partir do Azure Key Vault (scripts/sync-secrets.sh) - nunca neste repositorio.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fcg-config
+  namespace: fcg
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+  Jwt__Issuer: "FiapCloudGames"
+  Jwt__Audience: "FiapCloudGamesUsers"
+  Jwt__ExpirationHours: "8"
+  RabbitMQ__Host: "rabbitmq"
+  # Para usar Elastic Cloud / OpenSearch gerenciado, troque a URI abaixo e a
+  # credencial no Key Vault (ELASTIC_PASSWORD) - o codigo nao muda.
+  Elasticsearch__Uri: "http://elasticsearch:9200"
+  Elasticsearch__IndexName: "fcg-games"
+  Elasticsearch__Username: "elastic"
+  # E-mail do Admin inicial (a senha vem do Secret; so e criado se ainda nao existir).
+  Bootstrap__AdminEmail: "admin@fcg.com"

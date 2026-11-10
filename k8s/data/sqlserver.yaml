@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sqlserver
+  namespace: fcg
+spec:
+  serviceName: sqlserver
+  replicas: 1
+  selector:
+    matchLabels: { app: sqlserver }
+  template:
+    metadata:
+      labels: { app: sqlserver }
+    spec:
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: sqlserver
+          image: mcr.microsoft.com/mssql/server:2022-latest
+          ports: [{ containerPort: 1433 }]
+          env:
+            - { name: ACCEPT_EULA, value: "Y" }
+            - { name: MSSQL_PID, value: Developer }
+            - name: MSSQL_SA_PASSWORD
+              valueFrom: { secretKeyRef: { name: fcg-secrets, key: SQL_SA_PASSWORD } }
+          resources:
+            requests: { cpu: 250m, memory: 2Gi }
+            limits: { memory: 3Gi }
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -c
+                - /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/opt/mssql }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 10Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sqlserver
+  namespace: fcg
+spec:
+  clusterIP: None
+  selector: { app: sqlserver }
+  ports: [{ port: 1433, targetPort: 1433 }]

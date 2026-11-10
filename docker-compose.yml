@@ -1,115 +1,168 @@
-version: '3.8'
+﻿# FCG Fase 4 - ambiente local (espelha o que roda no AKS).
+# Nenhum segredo neste arquivo: tudo vem do .env (copie de .env.example e gere valores
+# com scripts/generate-local-env.sh). O .env nunca e versionado.
+# Variaveis comuns aos servicos .NET (sem segredos literais: tudo vem do .env)
+x-app-env: &app-env
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__MongoDB: "mongodb://${MONGO_USER:-fcgadmin}:${MONGO_PASSWORD}@mongodb:27017"
+      ConnectionStrings__Redis: "redis:6379,password=${REDIS_PASSWORD}"
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ${RABBITMQ_USER:-fcg}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
+      Jwt__Secret: ${JWT_SECRET:?defina JWT_SECRET no .env}
 
 services:
-
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    container_name: fcg-rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    healthcheck:
-      test: rabbitmq-diagnostics -q ping
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
-    container_name: fcg-sqlserver
     environment:
-      SA_PASSWORD: "FCG_Dev@2024"
       ACCEPT_EULA: "Y"
-      MSSQL_PID: "Developer"
-    ports:
-      - "1433:1433"
-    volumes:
-      - sqlserver_data:/var/opt/mssql
+      MSSQL_SA_PASSWORD: ${SQL_SA_PASSWORD:?defina SQL_SA_PASSWORD no .env}
+      MSSQL_PID: Developer
+    ports: ["1433:1433"]
+    volumes: [sqlserver-data:/var/opt/mssql]
     healthcheck:
-      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P "FCG_Dev@2024" -Q "SELECT 1" -C || exit 1
+      # Login real (nao so a porta TCP): evita PoolBlockingPeriod do SqlClient.
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U SA -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 20s
+    networks: [fcg-network]
+
+  mongodb:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-fcgadmin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?defina MONGO_PASSWORD no .env}
+    ports: ["27017:27017"]
+    volumes: [mongodb-data:/data/db]
+    networks: [fcg-network]
+
+  redis:
+    image: redis:7-alpine
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?defina REDIS_PASSWORD no .env}
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [fcg-network]
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-fcg}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?defina RABBITMQ_PASSWORD no .env}
+    ports: ["5672:5672", "15672:15672"]
+    volumes: [rabbitmq-data:/var/lib/rabbitmq]
+    networks: [fcg-network]
+
+  # Busca avancada (Fase 4). Em producao pode ser trocado por Elastic Cloud /
+  # Amazon OpenSearch apenas mudando Elasticsearch__Uri e as credenciais.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?defina ELASTIC_PASSWORD no .env}
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports: ["9200:9200"]
+    volumes: [elasticsearch-data:/usr/share/elasticsearch/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:$$ELASTIC_PASSWORD http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
       interval: 10s
       timeout: 5s
-      retries: 15
-      start_period: 40s
+      retries: 20
+      start_period: 30s
+    networks: [fcg-network]
 
   users-api:
-    build:
-      context: ../fcg-users-api
-      dockerfile: Dockerfile
-    container_name: fcg-users-api
-    ports:
-      - "5001:8080"
+    build: ../fcg-users-api
+    image: fcg-users-api:local
+    restart: on-failure:10
     environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=FCG_Users;User Id=SA;Password=FCG_Dev@2024;TrustServerCertificate=True;
-      - Jwt__Secret=FCG_SUPER_SECRET_KEY_CHANGE_IN_PRODUCTION_32CHARS!
-      - Jwt__Issuer=FiapCloudGames
-      - Jwt__Audience=FiapCloudGamesUsers
-      - Jwt__ExpirationHours=8
-      - RabbitMQ__Host=rabbitmq
-      - RabbitMQ__Username=guest
-      - RabbitMQ__Password=guest
+      <<: *app-env
+      ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=FCG_Users;User Id=SA;Password=${SQL_SA_PASSWORD};TrustServerCertificate=True;"
+      Bootstrap__AdminEmail: admin@fcg.com
+      Bootstrap__AdminPassword: ${ADMIN_PASSWORD:?defina ADMIN_PASSWORD no .env}
+    ports: ["8081:8080"]
     depends_on:
-      sqlserver:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      sqlserver: { condition: service_healthy }
+      mongodb: { condition: service_started }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_started }
+    networks: [fcg-network]
 
   catalog-api:
-    build:
-      context: ../fcg-catalog-api
-      dockerfile: Dockerfile
-    container_name: fcg-catalog-api
-    ports:
-      - "5002:8080"
+    build: ../fcg-catalog-api
+    image: fcg-catalog-api:local
+    restart: on-failure:10
     environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=FCG_Catalog;User Id=SA;Password=FCG_Dev@2024;TrustServerCertificate=True;
-      - Jwt__Secret=FCG_SUPER_SECRET_KEY_CHANGE_IN_PRODUCTION_32CHARS!
-      - Jwt__Issuer=FiapCloudGames
-      - Jwt__Audience=FiapCloudGamesUsers
-      - Jwt__ExpirationHours=8
-      - RabbitMQ__Host=rabbitmq
-      - RabbitMQ__Username=guest
-      - RabbitMQ__Password=guest
+      <<: *app-env
+      ConnectionStrings__DefaultConnection: "Server=sqlserver;Database=FCG_Catalog;User Id=SA;Password=${SQL_SA_PASSWORD};TrustServerCertificate=True;"
+      Elasticsearch__Uri: http://elasticsearch:9200
+      Elasticsearch__Username: elastic
+      Elasticsearch__Password: ${ELASTIC_PASSWORD}
+    ports: ["8082:8080"]
     depends_on:
-      sqlserver:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
+      sqlserver: { condition: service_healthy }
+      mongodb: { condition: service_started }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_started }
+      elasticsearch: { condition: service_healthy }
+    networks: [fcg-network]
 
   payments-api:
-    build:
-      context: ../fcg-payments-api
-      dockerfile: Dockerfile
-    container_name: fcg-payments-api
+    build: ../fcg-payments-api
+    image: fcg-payments-api:local
+    restart: on-failure:10
     environment:
-      - RabbitMQ__Host=rabbitmq
-      - RabbitMQ__Username=guest
-      - RabbitMQ__Password=guest
+      ConnectionStrings__MongoDB: "mongodb://${MONGO_USER:-fcgadmin}:${MONGO_PASSWORD}@mongodb:27017"
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ${RABBITMQ_USER:-fcg}
+      RabbitMQ__Password: ${RABBITMQ_PASSWORD}
     depends_on:
-      rabbitmq:
-        condition: service_healthy
+      mongodb: { condition: service_started }
+      rabbitmq: { condition: service_started }
+    networks: [fcg-network]
 
-  notifications-api:
-    build:
-      context: ../fcg-notifications-api
-      dockerfile: Dockerfile
-    container_name: fcg-notifications-api
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports: ["9090:9090"]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    networks: [fcg-network]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports: ["3000:3000"]
     environment:
-      - RabbitMQ__Host=rabbitmq
-      - RabbitMQ__Username=guest
-      - RabbitMQ__Password=guest
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?defina GRAFANA_ADMIN_PASSWORD no .env}
+    volumes:
+      - ./observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/dashboards-provider:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on: [prometheus]
+    networks: [fcg-network]
 
 volumes:
-  rabbitmq_data:
-  sqlserver_data:
+  sqlserver-data:
+  mongodb-data:
+  redis-data:
+  rabbitmq-data:
+  elasticsearch-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  fcg-network:
+    driver: bridge

@@ -1,0 +1,19 @@
+# Exposicao externa via Ingress NGINX (Service type LoadBalancer do Azure).
+# Em producao, adicione TLS (cert-manager) e um host: spec.rules[].host + spec.tls.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fcg-ingress
+  namespace: fcg
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - { path: /api/auth, pathType: Prefix, backend: { service: { name: users-api, port: { number: 8080 } } } }
+          - { path: /api/users, pathType: Prefix, backend: { service: { name: users-api, port: { number: 8080 } } } }
+          - { path: /api/profiles, pathType: Prefix, backend: { service: { name: users-api, port: { number: 8080 } } } }
+          - { path: /api/games, pathType: Prefix, backend: { service: { name: catalog-api, port: { number: 8080 } } } }

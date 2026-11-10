@@ -1,0 +1,151 @@
+name: infra
+
+# Valida os manifestos em todo PR. Em push na main (ou manualmente) provisiona/atualiza:
+#   Terraform (RG, ACR, AKS, Key Vault + segredos gerados)
+#   -> Ingress NGINX -> Secret do Kubernetes (lido do Key Vault) -> dados -> observabilidade -> Ingress
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**", "k8s/**", "scripts/**", ".github/workflows/infra.yml"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_deployer_object_ids: '["${{ vars.DEPLOYER_OBJECT_ID }}"]'
+
+jobs:
+  validate:
+    name: Validar manifestos e Terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: terraform fmt / validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: kubeconform (schemas do Kubernetes)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary -ignore-missing-schemas k8s/
+
+      - name: Garantir que nao ha segredos hardcoded
+        run: |
+          if grep -rnE "(password|passwd|secret|apikey)[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9+/_-]{8,}" k8s/ terraform/ --include=*.yaml --include=*.yml --include=*.tf \
+             | grep -vE "secretKeyRef|secretName|key: |name: |\\\$\(|\\\$\{|random_password|#"; then
+            echo "::error::Possivel credencial hardcoded encontrada."; exit 1
+          fi
+          echo "Nenhuma credencial hardcoded encontrada."
+
+  provision:
+    name: Provisionar infraestrutura e cluster
+    needs: validate
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: Terraform init (estado remoto)
+        working-directory: terraform
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ vars.TFSTATE_RG }}" \
+            -backend-config="storage_account_name=${{ vars.TFSTATE_SA }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=fcg-prod.tfstate" \
+            -backend-config="use_oidc=true" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform plan
+        working-directory: terraform
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Ler saidas
+        id: tf
+        working-directory: terraform
+        run: |
+          echo "rg=$(terraform output -raw resource_group)" >> "$GITHUB_OUTPUT"
+          echo "aks=$(terraform output -raw aks_name)" >> "$GITHUB_OUTPUT"
+          echo "acr=$(terraform output -raw acr_name)" >> "$GITHUB_OUTPUT"
+          echo "kv=$(terraform output -raw key_vault_name)" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ steps.tf.outputs.rg }}
+          cluster-name: ${{ steps.tf.outputs.aks }}
+
+      - name: Ingress NGINX (Load Balancer publico)
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx --create-namespace \
+            --set controller.replicaCount=2 \
+            --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz \
+            --wait --timeout 5m
+
+      - name: Namespace, configuracao e Secret (Key Vault -> Kubernetes)
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl apply -f k8s/01-config.yaml
+          bash scripts/sync-secrets.sh "${{ steps.tf.outputs.kv }}" fcg
+
+      - name: Camada de dados (SQL Server, MongoDB, Redis, RabbitMQ, Elasticsearch)
+        run: |
+          kubectl apply -f k8s/data/
+          for sts in sqlserver mongodb redis rabbitmq elasticsearch; do
+            kubectl rollout status statefulset/$sts -n fcg --timeout=600s
+          done
+
+      - name: Observabilidade e Ingress
+        run: |
+          kubectl apply -f k8s/observability/
+          kubectl apply -f k8s/ingress/
+
+      - name: Resumo
+        run: |
+          IP=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          {
+            echo "### Infra pronta"
+            echo "- Ingress (IP publico): \`$IP\`"
+            echo "- ACR: \`${{ steps.tf.outputs.acr }}\`  AKS: \`${{ steps.tf.outputs.aks }}\`  RG: \`${{ steps.tf.outputs.rg }}\`"
+            echo "- Cadastre ACR_NAME / AKS_NAME / AKS_RESOURCE_GROUP como variables nos repos dos servicos (scripts/set-github-vars.sh)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          kubectl get pods -n fcg

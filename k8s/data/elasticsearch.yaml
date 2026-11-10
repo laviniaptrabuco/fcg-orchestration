@@ -1,0 +1,59 @@
+# Busca avancada (Fase 4). Instancia unica com seguranca habilitada (basic auth).
+# Em producao real prefira um servico gerenciado (Elastic Cloud / OpenSearch):
+# basta apontar Elasticsearch__Uri (01-config.yaml) e a credencial no Key Vault.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: fcg
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels: { app: elasticsearch }
+  template:
+    metadata:
+      labels: { app: elasticsearch }
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          ports: [{ containerPort: 9200 }]
+          env:
+            - { name: discovery.type, value: single-node }
+            - { name: xpack.security.enabled, value: "true" }
+            - { name: xpack.security.http.ssl.enabled, value: "false" }
+            - { name: ES_JAVA_OPTS, value: "-Xms512m -Xmx512m" }
+            - name: ELASTIC_PASSWORD
+              valueFrom: { secretKeyRef: { name: fcg-secrets, key: ELASTIC_PASSWORD } }
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits: { memory: 1536Mi }
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - curl -s -u "elastic:$ELASTIC_PASSWORD" http://localhost:9200/_cluster/health | grep -qE '"status":"(green|yellow)"'
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /usr/share/elasticsearch/data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 10Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: fcg
+spec:
+  clusterIP: None
+  selector: { app: elasticsearch }
+  ports: [{ port: 9200, targetPort: 9200 }]
