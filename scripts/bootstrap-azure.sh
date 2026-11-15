@@ -14,7 +14,7 @@ export MSYS_NO_PATHCONV=1  # Git Bash no Windows nao pode converter /subscriptio
 GITHUB_OWNER="${GITHUB_OWNER:?defina GITHUB_OWNER (usuario/organizacao do GitHub)}"
 LOCATION="${LOCATION:-brazilsouth}"
 REPOS=(fcg-orchestration fcg-users-api fcg-catalog-api fcg-payments-api)
-APP_NAME="fcg-github-actions"
+APP_NAME="${APP_NAME:-fcg-github-actions}"
 TFSTATE_RG="rg-fcg-tfstate"
 
 SUB_ID=$(az account show --query id -o tsv)
@@ -38,12 +38,15 @@ SP_OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
 for repo in "${REPOS[@]}"; do
   for subject in "ref:refs/heads/main" "environment:production" "pull_request"; do
     name="${repo}-$(echo "$subject" | tr ':/' '--')"
-    az ad app federated-credential create --id "$APP_ID" --parameters "{
+    if ! out=$(az ad app federated-credential create --id "$APP_ID" --parameters "{
       \"name\": \"${name}\",
       \"issuer\": \"https://token.actions.githubusercontent.com\",
       \"subject\": \"repo:${GITHUB_OWNER}/${repo}:${subject}\",
       \"audiences\": [\"api://AzureADTokenExchange\"]
-    }" -o none 2>/dev/null || echo "   (credencial $name ja existe)"
+    }" -o none 2>&1); then
+      if grep -qi "already exists\|conflict" <<<"$out"; then echo "   (credencial $name ja existe)"
+      else echo "ERRO ao criar credencial $name: $out" >&2; exit 1; fi
+    fi
   done
 done
 
