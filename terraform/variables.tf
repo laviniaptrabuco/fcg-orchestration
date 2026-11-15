@@ -31,7 +31,7 @@ variable "node_count" {
 variable "node_vm_size" {
   description = "SKU das VMs dos nos. O SQL Server exige >= 2 GB livres: use pelo menos 8 GB de RAM."
   type        = string
-  default     = "Standard_D2s_v3"
+  default     = "Standard_D2s_v6"
 }
 
 variable "deployer_object_ids" {

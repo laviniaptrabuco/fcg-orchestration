@@ -109,7 +109,7 @@ az aks get-credentials -g <resource_group> -n <aks_name>
 kubectl get svc ingress-nginx-controller -n ingress-nginx
 ```
 
-> **Custo**: 2 nós `Standard_D2s_v3` + ACR Standard + Key Vault. Destrua ao terminar: `terraform destroy`
+> **Custo**: 2 nós `Standard_D2s_v6` + ACR Standard + Key Vault. Destrua ao terminar: `terraform destroy`
 > (ou `az group delete -n rg-fcg-prod`).
 
 ## Roteiro de teste (substitua `$IP` pelo IP do Ingress)
