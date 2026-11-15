@@ -3,7 +3,7 @@ location     = "brazilsouth"
 prefix       = "fcg"
 environment  = "prod"
 node_count   = 2
-node_vm_size = "Standard_D2s_v6"
+node_vm_size = "Standard_D2s_v4"
 
 # Object ID da identidade usada pelo GitHub Actions (saida do bootstrap-azure.sh).
 deployer_object_ids = []
