@@ -9,6 +9,7 @@
 #
 # Uso: GITHUB_OWNER=laviniaptrabuco bash scripts/bootstrap-azure.sh
 set -euo pipefail
+export MSYS_NO_PATHCONV=1  # Git Bash no Windows nao pode converter /subscriptions/... em caminho
 
 GITHUB_OWNER="${GITHUB_OWNER:?defina GITHUB_OWNER (usuario/organizacao do GitHub)}"
 LOCATION="${LOCATION:-brazilsouth}"
